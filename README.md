@@ -14,7 +14,7 @@ A reusable GitHub Action for sending workflow status notifications to Mattermost
 ## Usage
 
    ```yaml
-   - uses: wire-network/cicd-notifications@v1
+     uses: Wire-Network/cicd-notifications/.github/workflows/notification.yaml@v1
      with:
        webhook-url: ${{ secrets.WEBHOOK_URL }}
        # ... other inputs
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send Notification
-        uses: wire-network/cicd-notifications@v1
+        uses: Wire-Network/cicd-notifications/.github/workflows/notification.yaml@v1
         with:
           webhook-url: ${{ secrets.WEBHOOK_URL }}
           notification-type: mattermost
