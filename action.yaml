@@ -1,0 +1,237 @@
+name: 'Send CI/CD Notification'
+description: 'Send workflow status notifications to Slack or Mattermost'
+author: 'Wire Network'
+
+inputs:
+  webhook-url:
+    description: 'Webhook URL for Slack or Mattermost'
+    required: true
+  notification-type:
+    description: 'Type of notification service: 1 for Mattermost, 2 for Slack'
+    required: true
+    default: '1'
+  channel:
+    description: 'Channel name (for Mattermost) or channel ID (for Slack)'
+    required: false
+    default: 'cicd-notifications'
+  workflow-name:
+    description: 'Name of the workflow (e.g., "Build & Test Workflow")'
+    required: true
+  job-results:
+    description: 'Job results - either JSON string {"job":"status"} or space/newline-separated "job:status" pairs'
+    required: true
+  # GitHub context - these will be populated automatically from github context
+  github-repository:
+    description: 'Repository name'
+    required: false
+    default: ${{ github.repository }}
+  github-ref-name:
+    description: 'Branch/ref name'
+    required: false
+    default: ${{ github.ref_name }}
+  github-head-ref:
+    description: 'Head ref for pull requests'
+    required: false
+    default: ${{ github.head_ref }}
+  github-sha:
+    description: 'Commit SHA'
+    required: false
+    default: ${{ github.sha }}
+  github-actor:
+    description: 'User who triggered the workflow'
+    required: false
+    default: ${{ github.actor }}
+  github-run-id:
+    description: 'Workflow run ID'
+    required: false
+    default: ${{ github.run_id }}
+  github-server-url:
+    description: 'GitHub server URL'
+    required: false
+    default: ${{ github.server_url }}
+  github-event-name:
+    description: 'Event name'
+    required: false
+    default: ${{ github.event_name }}
+  github-event-pr-number:
+    description: 'Pull request number'
+    required: false
+    default: ${{ github.event.pull_request.number }}
+  github-event-pr-url:
+    description: 'Pull request URL'
+    required: false
+    default: ${{ github.event.pull_request.html_url }}
+
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Send Notification
+      shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook-url }}
+        NOTIFICATION_TYPE: ${{ inputs.notification-type }}
+        CHANNEL: ${{ inputs.channel }}
+        WORKFLOW_NAME: ${{ inputs.workflow-name }}
+        JOB_RESULTS: ${{ inputs.job-results }}
+        REPOSITORY: ${{ inputs.github-repository }}
+        REF_NAME: ${{ inputs.github-ref-name }}
+        HEAD_REF: ${{ inputs.github-head-ref }}
+        COMMIT_SHA: ${{ inputs.github-sha }}
+        ACTOR: ${{ inputs.github-actor }}
+        RUN_ID: ${{ inputs.github-run-id }}
+        SERVER_URL: ${{ inputs.github-server-url }}
+        EVENT_NAME: ${{ inputs.github-event-name }}
+        PR_NUMBER: ${{ inputs.github-event-pr-number }}
+        PR_URL: ${{ inputs.github-event-pr-url }}
+      run: |
+        # Determine branch name
+        if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          BRANCH="$HEAD_REF"
+        else
+          BRANCH="$REF_NAME"
+        fi
+
+        # Parse job results - support both JSON and simple format
+        # Simple format: "job1:success job2:failure" or newline-separated
+        # JSON format: {"job1":"success","job2":"failure"}
+        if [[ "$JOB_RESULTS" =~ ^\{.*\}$ ]]; then
+          # Already JSON, use as-is
+          JOB_RESULTS_JSON="$JOB_RESULTS"
+        else
+          # Convert simple format to JSON
+          JOB_RESULTS_JSON="{"
+          FIRST=true
+          for pair in $JOB_RESULTS; do
+            if [[ "$pair" =~ ^([^:]+):([^:]+)$ ]]; then
+              job="${BASH_REMATCH[1]}"
+              status="${BASH_REMATCH[2]}"
+              if [ "$FIRST" = true ]; then
+                JOB_RESULTS_JSON="${JOB_RESULTS_JSON}\"${job}\":\"${status}\""
+                FIRST=false
+              else
+                JOB_RESULTS_JSON="${JOB_RESULTS_JSON},\"${job}\":\"${status}\""
+              fi
+            fi
+          done
+          JOB_RESULTS_JSON="${JOB_RESULTS_JSON}}"
+        fi
+
+        # Function to get emoji and text for status
+        get_status_info() {
+          case "$1" in
+            success)
+              echo "✅|SUCCESS|#00FF00|good"
+              ;;
+            failure)
+              echo "❌|FAILURE|#FF0000|danger"
+              ;;
+            cancelled)
+              echo "◻️|CANCELLED|#808080|#808080"
+              ;;
+            skipped)
+              echo "⏭️|SKIPPED|#FFA500|warning"
+              ;;
+            *)
+              echo "❓|UNKNOWN|#808080|#808080"
+              ;;
+          esac
+        }
+
+        # Function to format job name for display
+        format_job_name() {
+          echo "$1" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1'
+        }
+
+        # Determine overall status
+        # Priority: failure > cancelled > skipped > success
+        if echo "$JOB_RESULTS_JSON" | jq -e '[.[] | select(. == "failure")] | length > 0' > /dev/null 2>&1; then
+          OVERALL_STATUS="failure"
+        elif echo "$JOB_RESULTS_JSON" | jq -e '[.[] | select(. == "cancelled")] | length > 0' > /dev/null 2>&1; then
+          OVERALL_STATUS="cancelled"
+        elif echo "$JOB_RESULTS_JSON" | jq -e '[.[] | select(. == "skipped")] | length > 0' > /dev/null 2>&1; then
+          OVERALL_STATUS="skipped"
+        else
+          OVERALL_STATUS="success"
+        fi
+
+        # Get status display info
+        IFS='|' read -r STATUS_EMOJI STATUS_TEXT COLOR SLACK_COLOR <<< "$(get_status_info "$OVERALL_STATUS")"
+
+        # Build job status details (only show non-success jobs)
+        JOB_DETAILS=""
+        echo "$JOB_RESULTS_JSON" | jq -r 'to_entries | .[] | "\(.key)|\(.value)"' | while IFS='|' read -r job result; do
+          if [[ "$result" != "success" ]]; then
+            JOB_NAME=$(format_job_name "$job")
+            JOB_STATUS_INFO=$(get_status_info "$result")
+            JOB_EMOJI=$(echo "$JOB_STATUS_INFO" | cut -d'|' -f1)
+            
+            if [[ -z "$JOB_DETAILS" ]]; then
+              JOB_DETAILS="\n- **${JOB_NAME}**: ${JOB_EMOJI} ${result}"
+            else
+              JOB_DETAILS="${JOB_DETAILS}\n- **${JOB_NAME}**: ${JOB_EMOJI} ${result}"
+            fi
+          fi
+        done
+
+        # Add PR info if present
+        PR_INFO=""
+        if [[ -n "$PR_NUMBER" && "$PR_NUMBER" != "null" && "$PR_NUMBER" != "" ]]; then
+          PR_INFO="\n**PR**: [#${PR_NUMBER}](${PR_URL})"
+        fi
+
+        # Short commit SHA
+        SHORT_SHA="${COMMIT_SHA:0:7}"
+
+        # Build URLs
+        COMMIT_URL="${SERVER_URL}/${REPOSITORY}/commit/${COMMIT_SHA}"
+        RUN_URL="${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}"
+
+        # Send notification based on type
+        if [[ "$NOTIFICATION_TYPE" == "2" ]]; then
+          # Slack payload
+          PAYLOAD=$(cat <<EOF
+        {
+          "channel": "$CHANNEL",
+          "username": "GitHub Actions",
+          "icon_url": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+          "attachments": [{
+            "color": "$SLACK_COLOR",
+            "title": "$STATUS_EMOJI $STATUS_TEXT: $WORKFLOW_NAME",
+            "text": "*Repository:* $REPOSITORY\n*Branch:* $BRANCH${PR_INFO}\n*Commit:* <$COMMIT_URL|\\\`$SHORT_SHA\\\`>\n*Triggered by:* $ACTOR\n*Workflow Run:* <$RUN_URL|View Details>${JOB_DETAILS}",
+            "footer": "GitHub Actions",
+            "footer_icon": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+          }]
+        }
+        EOF
+          )
+        else
+          # Mattermost payload
+          PAYLOAD=$(cat <<EOF
+        {
+          "channel": "$CHANNEL",
+          "username": "GitHub Actions",
+          "icon_url": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+          "attachments": [{
+            "color": "$COLOR",
+            "title": "$STATUS_EMOJI $STATUS_TEXT: $WORKFLOW_NAME",
+            "text": "**Repository**: $REPOSITORY\n**Branch**: $BRANCH${PR_INFO}\n**Commit**: [\\\`$SHORT_SHA\\\`]($COMMIT_URL)\n**Triggered by**: $ACTOR\n**Workflow Run**: [View Details]($RUN_URL)${JOB_DETAILS}"
+          }]
+        }
+        EOF
+          )
+        fi
+
+        # Send the notification
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$WEBHOOK_URL" \
+          -H "Content-Type: application/json" \
+          -d "$PAYLOAD")
+
+        if [[ "$HTTP_STATUS" -ge 200 && "$HTTP_STATUS" -lt 300 ]]; then
+          echo "✅ Notification sent successfully to $NOTIFICATION_TYPE (HTTP $HTTP_STATUS)"
+        else
+          echo "⚠️  Warning: Notification request returned HTTP $HTTP_STATUS"
+          echo "Payload sent:"
+          echo "$PAYLOAD"
+          exit 1
+        fi
