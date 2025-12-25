@@ -53,6 +53,7 @@ jobs:
           channel: cicd-notifications
           workflow-name: "Build & Test Workflow"
           job-results: "build-and-test:${{ needs.build-and-test.result }}"
+          github-context: ${{ toJSON(github) }}
 ```
 
 ### Advanced Example (Multiple Jobs)
@@ -100,6 +101,7 @@ jobs:
             tests:${{ needs.tests.result }}
             np-tests:${{ needs.np-tests.result }}
             lr-tests:${{ needs.lr-tests.result }}
+          github-context: ${{ toJSON(github) }}
 
       - name: Fail if any tests failed
         if: |
@@ -115,12 +117,13 @@ Simply change the `notification-type` to `2` and provide the Slack channel ID:
 
 ```yaml
 - name: Send Slack Notification
-  uses: wire-network/cicd-notifications@v1
+  uses: Wire-Network/notification-action@v1
   with:
     webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
     notification-type: 2
     channel: C01234567  # Slack channel ID
-    # ... rest of the inputs
+    job-results: "build-and-test:${{ needs.build-and-test.result }}"
+    github-context: ${{ toJSON(github) }}
 ```
 
 ## Inputs
@@ -132,8 +135,7 @@ Simply change the `notification-type` to `2` and provide the Slack channel ID:
 | `channel` | No | `cicd-notifications` | Channel name (Mattermost) or channel ID (Slack) |
 | `workflow-name` | Yes | - | Name of the workflow (e.g., `Build & Test Workflow`) |
 | `job-results` | Yes | - | Job results in `job:status` format (space or newline-separated) or JSON |
-
-**All GitHub context is automatically captured** - you don't need to pass repository, branch, commit SHA, actor, run ID, etc. The action reads them from the GitHub context automatically.
+| `github-context` | Yes | - | JSON string of GitHub context |
 
 ### Job Results Format
 
@@ -160,14 +162,10 @@ job-results: "build-and-test:${{ needs.build-and-test.result }}"
 job-results: '{"tests":"success","build":"failure","deploy":"skipped"}'
 ```
 
-## Notification Examples
-
-TBD
-
 ## Tips
 
 1. **Always use `if: always()`** on the notification job to ensure it runs even if other jobs fail
-2. **Keep webhook URLs in secrets** - never commit them to your repository
+2. **Keep webhook URLs in secrets**
 3. **Use meaningful job names** - they'll be formatted and displayed in notifications
 4. **Test with workflow_dispatch** to manually trigger and verify notifications
 
@@ -175,9 +173,9 @@ TBD
 
 You can reference the aciton several ways:
 
-- **Specific tag**: `wire-network/cicd-notifications@v1` (recommended)
-- **Specific commit**: `wire-network/cicd-notifications@abc1234` (for testing)
-- **Branch**: `wire-network/cicd-notifications@master` (for latest changes, less stable)
+- **Specific tag**: `wire-network/notification-action@v1` (recommended)
+- **Specific commit**: `wire-network/notification-action@abc1234` (for testing)
+- **Branch**: `wire-network/notification-action@master`
 
 ### Creating New Versions
 
@@ -185,12 +183,10 @@ When you make changes to the action:
 
 ```bash
 # Tag a new version
-git tag -a v1.1.0 -m "Add support for custom icons"
+git tag -a v1.1.0 -m "Your commit message"
 git push origin v1.1.0
 
 # Update the major version tag to point to latest
 git tag -fa v1 -m "Update v1 to v1.1.0"
 git push origin v1 --force
 ```
-
-This allows users to use `@v1` for automatic minor updates while staying on major version 1.
