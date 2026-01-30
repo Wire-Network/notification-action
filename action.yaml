@@ -30,26 +30,28 @@ runs:
   steps:
     - name: Send Notification
       shell: bash
+      env:
+        GITHUB_CONTEXT: ${{ inputs.github-context }}
       run: |
         set -e
-        
+
         echo "Starting notification action..."
-        
+
         # Get inputs
         WEBHOOK_URL="${{ inputs.webhook-url }}"
         NOTIFICATION_TYPE="${{ inputs.notification-type }}"
         CHANNEL="${{ inputs.channel }}"
         WORKFLOW_NAME="${{ inputs.workflow-name }}"
         JOB_RESULTS="${{ inputs.job-results }}"
-        
+
         echo "Inputs:"
         echo "  Notification Type: $NOTIFICATION_TYPE"
         echo "  Channel: $CHANNEL"
         echo "  Workflow Name: $WORKFLOW_NAME"
         echo "  Job Results: $JOB_RESULTS"
-        
-        # Use provided GitHub context values
-        GITHUB_CONTEXT='${{ inputs.github-context }}'
+
+        # GITHUB_CONTEXT is passed via env block to avoid shell interpolation issues
+        # (PR bodies can contain parentheses, ampersands, quotes, etc.)
         
         REPOSITORY=$(echo "$GITHUB_CONTEXT" | jq -r '.repository')
         REF_NAME=$(echo "$GITHUB_CONTEXT" | jq -r '.ref_name')
