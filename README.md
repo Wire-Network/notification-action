@@ -1,6 +1,6 @@
 # CI/CD Notification Action
 
-A reusable GitHub Action for sending workflow status notifications to Mattermost or Slack. Supports all GitHub Actions job statuses: success ✅, failure ❌, cancelled ◻️, and skipped ⏭️.
+A reusable GitHub Action for sending workflow status notifications to Mattermost or Slack. Supports all GitHub Actions job statuses: success ✅, failure ❌, cancelled ⚫, and skipped ⏭️.
 
 ## Status Indicators
 
@@ -8,13 +8,22 @@ A reusable GitHub Action for sending workflow status notifications to Mattermost
 |--------|-------|-------|-------------|
 | Success | ✅ | Green (#00FF00) | All jobs completed successfully |
 | Failure | ❌ | Red (#FF0000) | One or more jobs failed |
-| Cancelled | ◻️ | Gray (#808080) | Workflow was cancelled |
+| Cancelled | ⚫ | Gray (#808080) | Workflow was cancelled |
 | Skipped | ⏭️ | Orange (#FFA500) | Jobs were skipped |
+
+`success` is reported only when every job result is exactly `success`. Otherwise the
+worst status wins, in the order `failure` > `cancelled` > `skipped`, and any value outside
+that set is reported as ❓ UNKNOWN rather than folded into green.
+
+The action **fails closed**: `job-results` that parses to nothing, or an entry without a
+non-empty status, exits the step non-zero instead of sending a notification. A silent
+fallthrough to green is what let comma-separated `job-results` report success over failing
+builds.
 
 ## Usage
 
    ```yaml
-     uses: Wire-Network/cicd-notifications/.github/workflows/notification.yaml@v1
+     uses: Wire-Network/notification-action@v1
      with:
        webhook-url: ${{ secrets.WEBHOOK_URL }}
        # ... other inputs
@@ -46,10 +55,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send Notification
-        uses: Wire-Network/cicd-notifications/.github/workflows/notification.yaml@v1
+        uses: Wire-Network/notification-action@v1
         with:
           webhook-url: ${{ secrets.WEBHOOK_URL }}
-          notification-type: mattermost
+          notification-type: 1
           channel: cicd-notifications
           workflow-name: "Build & Test Workflow"
           job-results: "build-and-test:${{ needs.build-and-test.result }}"
@@ -91,10 +100,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send Notification
-        uses: wire-network/cicd-notifications@v1
+        uses: Wire-Network/notification-action@v1
         with:
           webhook-url: ${{ secrets.WEBHOOK_URL }}
-          notification-type: mattermost
+          notification-type: 1
           channel: cicd-notifications
           workflow-name: "Build & Test Workflow"
           job-results: |
@@ -131,15 +140,16 @@ Simply change the `notification-type` to `2` and provide the Slack channel ID:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `webhook-url` | Yes | - | Webhook URL for Slack or Mattermost |
-| `notification-type` | Yes | `mattermost` | Type of notification service (1 or 2) |
+| `notification-type` | Yes | `1` | Notification service: `1` for Mattermost, `2` for Slack |
 | `channel` | No | `cicd-notifications` | Channel name (Mattermost) or channel ID (Slack) |
 | `workflow-name` | Yes | - | Name of the workflow (e.g., `Build & Test Workflow`) |
-| `job-results` | Yes | - | Job results in `job:status` format (space or newline-separated) or JSON |
+| `job-results` | Yes | - | Job results as `job:status` pairs (comma-, space- or newline-separated) or a JSON object |
 | `github-context` | Yes | - | JSON string of GitHub context |
 
 ### Job Results Format
 
-You can pass job results in two formats:
+You can pass job results in two formats. Entries may be separated by any mix of
+commas, spaces and newlines.
 
 **Simple format (recommended):**
 
@@ -156,11 +166,30 @@ Or inline for single job:
 job-results: "build-and-test:${{ needs.build-and-test.result }}"
 ```
 
+Or comma-separated on one line:
+
+```yaml
+job-results: "tests:${{ needs.tests.result }},build:${{ needs.build.result }}"
+```
+
 **JSON format (also supported):**
 
 ```yaml
 job-results: '{"tests":"success","build":"failure","deploy":"skipped"}'
 ```
+
+## Development
+
+`scripts/notify.sh` holds the implementation; `action.yaml` only passes the inputs
+through the environment. Run the suite with:
+
+```bash
+tests/run-tests.sh
+```
+
+It exercises every separator form, the status precedence, the fail-closed paths, the
+rendered payload and the webhook call itself against a local sink. `NOTIFY_DRY_RUN=1`
+prints the payload to stdout and skips the webhook.
 
 ## Tips
 
