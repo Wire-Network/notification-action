@@ -18,244 +18,29 @@ inputs:
     description: 'Name of the workflow (e.g., "Build & Test Workflow")'
     required: true
   job-results:
-    description: 'Job results - either JSON string {"job":"status"} or space/newline-separated "job:status" pairs'
+    description: >-
+      Job results, as a JSON object {"job":"status"} or as `job:status` pairs
+      separated by commas, spaces or newlines. Every entry must carry a
+      non-empty status; input that parses to nothing is a hard error rather
+      than a green notification.
     required: true
   github-context:
     description: 'GitHub context as JSON (use toJSON(github))'
     required: true
-
 
 runs:
   using: 'composite'
   steps:
     - name: Send Notification
       shell: bash
+      # Inputs cross into the script through the environment, never through
+      # `${{ }}` interpolation into the run body: workflow names, branch names
+      # and PR titles routinely contain quotes and shell metacharacters.
       env:
+        INPUT_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        INPUT_NOTIFICATION_TYPE: ${{ inputs.notification-type }}
+        INPUT_CHANNEL: ${{ inputs.channel }}
+        INPUT_WORKFLOW_NAME: ${{ inputs.workflow-name }}
+        INPUT_JOB_RESULTS: ${{ inputs.job-results }}
         GITHUB_CONTEXT: ${{ inputs.github-context }}
-      run: |
-        set -e
-
-        echo "Starting notification action..."
-
-        # Get inputs
-        WEBHOOK_URL="${{ inputs.webhook-url }}"
-        NOTIFICATION_TYPE="${{ inputs.notification-type }}"
-        CHANNEL="${{ inputs.channel }}"
-        WORKFLOW_NAME="${{ inputs.workflow-name }}"
-        JOB_RESULTS="${{ inputs.job-results }}"
-
-        echo "Inputs:"
-        echo "  Notification Type: $NOTIFICATION_TYPE"
-        echo "  Channel: $CHANNEL"
-        echo "  Workflow Name: $WORKFLOW_NAME"
-        echo "  Job Results: $JOB_RESULTS"
-
-        # GITHUB_CONTEXT is passed via env block to avoid shell interpolation issues
-        # (PR bodies can contain parentheses, ampersands, quotes, etc.)
-        
-        REPOSITORY=$(echo "$GITHUB_CONTEXT" | jq -r '.repository')
-        REF_NAME=$(echo "$GITHUB_CONTEXT" | jq -r '.ref_name')
-        HEAD_REF=$(echo "$GITHUB_CONTEXT" | jq -r '.head_ref // ""')
-        COMMIT_SHA=$(echo "$GITHUB_CONTEXT" | jq -r '.sha')
-        ACTOR=$(echo "$GITHUB_CONTEXT" | jq -r '.actor')
-        RUN_ID=$(echo "$GITHUB_CONTEXT" | jq -r '.run_id')
-        SERVER_URL=$(echo "$GITHUB_CONTEXT" | jq -r '.server_url')
-        EVENT_NAME=$(echo "$GITHUB_CONTEXT" | jq -r '.event_name')
-        PR_NUMBER=$(echo "$GITHUB_CONTEXT" | jq -r '.event.pull_request.number // ""')
-        PR_URL=$(echo "$GITHUB_CONTEXT" | jq -r '.event.pull_request.html_url // ""')
-        
-        echo ""
-        echo "GitHub Context:"
-        echo "  Repository: $REPOSITORY"
-        echo "  Event: $EVENT_NAME"
-        echo "  Ref Name: $REF_NAME"
-        echo "  Commit: ${COMMIT_SHA:0:7}"
-        echo "  Actor: $ACTOR"
-        
-        # Determine branch name
-        if [[ "$EVENT_NAME" == "pull_request" ]]; then
-          BRANCH="$HEAD_REF"
-          echo "  Branch: $BRANCH (from PR head ref)"
-        else
-          BRANCH="$REF_NAME"
-          echo "  Branch: $BRANCH (from ref name)"
-        fi
-
-        echo ""
-        echo "Parsing job results..."
-        # Parse job results - support both JSON and simple format
-        if [[ "$JOB_RESULTS" =~ ^\{.*\}$ ]]; then
-          JOB_RESULTS_JSON="$JOB_RESULTS"
-          echo "  Input is JSON format"
-        else
-          echo "  Converting to JSON..."
-          JOB_RESULTS_JSON="{"
-          FIRST=true
-          for pair in $JOB_RESULTS; do
-            if [[ "$pair" =~ ^([^:]+):([^:]+)$ ]]; then
-              job="${BASH_REMATCH[1]}"
-              status="${BASH_REMATCH[2]}"
-              echo "    $job: $status"
-              if [ "$FIRST" = true ]; then
-                JOB_RESULTS_JSON="${JOB_RESULTS_JSON}\"${job}\":\"${status}\""
-                FIRST=false
-              else
-                JOB_RESULTS_JSON="${JOB_RESULTS_JSON},\"${job}\":\"${status}\""
-              fi
-            fi
-          done
-          JOB_RESULTS_JSON="${JOB_RESULTS_JSON}}"
-          echo "  Result: $JOB_RESULTS_JSON"
-        fi
-
-        # Function to get emoji and text for status
-        get_status_info() {
-          case "$1" in
-            success)
-              echo "✅|SUCCESS|#00FF00|good"
-              ;;
-            failure)
-              echo "❌|FAILURE|#FF0000|danger"
-              ;;
-            cancelled)
-              echo "⚫|CANCELLED|#808080|#808080"
-              ;;
-            skipped)
-              echo "⏭️|SKIPPED|#FFA500|warning"
-              ;;
-            *)
-              echo "❓|UNKNOWN|#808080|#808080"
-              ;;
-          esac
-        }
-
-        # Function to format job name for display
-        format_job_name() {
-          echo "$1" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1'
-        }
-
-        echo ""
-        echo "Determining overall status..."
-        # Determine overall status (priority: failure > cancelled > skipped > success)
-        if echo "$JOB_RESULTS_JSON" | jq -e '[.[] | select(. == "failure")] | length > 0' > /dev/null 2>&1; then
-          OVERALL_STATUS="failure"
-          echo "  Overall: FAILURE"
-        elif echo "$JOB_RESULTS_JSON" | jq -e '[.[] | select(. == "cancelled")] | length > 0' > /dev/null 2>&1; then
-          OVERALL_STATUS="cancelled"
-          echo "  Overall: CANCELLED"
-        elif echo "$JOB_RESULTS_JSON" | jq -e '[.[] | select(. == "skipped")] | length > 0' > /dev/null 2>&1; then
-          OVERALL_STATUS="skipped"
-          echo "  Overall: SKIPPED"
-        else
-          OVERALL_STATUS="success"
-          echo "  Overall: SUCCESS"
-        fi
-
-        # Get status display info
-        IFS='|' read -r STATUS_EMOJI STATUS_TEXT COLOR SLACK_COLOR <<< "$(get_status_info "$OVERALL_STATUS")"
-        echo "  Emoji: $STATUS_EMOJI"
-        echo "  Color: $COLOR"
-
-        # Build job status details (only show non-success jobs)
-        JOB_DETAILS=""
-        echo "$JOB_RESULTS_JSON" | jq -r 'to_entries | .[] | "\(.key)|\(.value)"' | while IFS='|' read -r job result; do
-          if [[ "$result" != "success" ]]; then
-            JOB_NAME=$(format_job_name "$job")
-            JOB_STATUS_INFO=$(get_status_info "$result")
-            JOB_EMOJI=$(echo "$JOB_STATUS_INFO" | cut -d'|' -f1)
-            
-            if [[ -z "$JOB_DETAILS" ]]; then
-              JOB_DETAILS="\n- **${JOB_NAME}**: ${JOB_EMOJI} ${result}"
-            else
-              JOB_DETAILS="${JOB_DETAILS}\n- **${JOB_NAME}**: ${JOB_EMOJI} ${result}"
-            fi
-          fi
-        done
-
-        echo ""
-        # Add PR info if present
-        PR_INFO=""
-        if [[ -n "$PR_NUMBER" && "$PR_NUMBER" != "null" && "$PR_NUMBER" != "" ]]; then
-          PR_INFO="\n**PR**: [#${PR_NUMBER}](${PR_URL})"
-          echo "PR: #$PR_NUMBER"
-        else
-          echo "No PR information"
-        fi
-
-        # Short commit SHA
-        SHORT_SHA="${COMMIT_SHA:0:7}"
-
-        # Build URLs
-        COMMIT_URL="${SERVER_URL}/${REPOSITORY}/commit/${COMMIT_SHA}"
-        RUN_URL="${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}"
-        REPO_URL="${SERVER_URL}/${REPOSITORY}"
-        BRANCH_URL="${SERVER_URL}/${REPOSITORY}/tree/${BRANCH}"
-        
-        echo ""
-        echo "Generated URLs:"
-        echo "  Repository: $REPO_URL"
-        echo "  Branch: $BRANCH_URL"
-        echo "  Commit: $COMMIT_URL"
-        echo "  Workflow: $RUN_URL"
-
-        echo ""
-        echo "Building payload..."
-        # Send notification based on type
-        if [[ "$NOTIFICATION_TYPE" == "2" ]]; then
-          echo "  Target: Slack"
-          # Slack payload
-          PAYLOAD="{
-            \"channel\": \"$CHANNEL\",
-            \"username\": \"GitHub Actions\",
-            \"icon_url\": \"https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png\",
-            \"attachments\": [{
-              \"color\": \"$SLACK_COLOR\",
-              \"title\": \"$STATUS_EMOJI $STATUS_TEXT: $WORKFLOW_NAME\",
-              \"text\": \"*Repository:* <$REPO_URL|$REPOSITORY>\\n*Branch:* <$BRANCH_URL|$BRANCH>${PR_INFO}\\n*Commit:* <$COMMIT_URL|\`$SHORT_SHA\`>\\n*Triggered by:* $ACTOR\\n*Workflow Run:* <$RUN_URL|View Details>${JOB_DETAILS}\",
-              \"footer\": \"GitHub Actions\",
-              \"footer_icon\": \"https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png\"
-            }]
-          }"
-        else
-          echo "  Target: Mattermost"
-          # Mattermost payload
-          PAYLOAD="{
-            \"channel\": \"$CHANNEL\",
-            \"username\": \"GitHub Actions\",
-            \"icon_url\": \"https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png\",
-            \"attachments\": [{
-              \"color\": \"$COLOR\",
-              \"title\": \"$STATUS_EMOJI $STATUS_TEXT: $WORKFLOW_NAME\",
-              \"text\": \"**Repository**: [$REPOSITORY]($REPO_URL)\\n**Branch**: [$BRANCH]($BRANCH_URL)${PR_INFO}\\n**Commit**: [\`$SHORT_SHA\`]($COMMIT_URL)\\n**Triggered by**: $ACTOR\\n**Workflow Run**: [View Details]($RUN_URL)${JOB_DETAILS}\"
-            }]
-          }"
-        fi
-        
-        echo ""
-        echo "Payload preview:"
-        echo "$PAYLOAD" | jq . 2>/dev/null || {
-          echo "  (jq formatting failed)"
-          echo "  Channel: $CHANNEL"
-          echo "  Status: $STATUS_TEXT"
-        }
-
-        echo ""
-        echo "Sending notification..."
-        # Send the notification
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$WEBHOOK_URL" \
-          -H "Content-Type: application/json" \
-          -d "$PAYLOAD")
-
-        echo "  HTTP Response: $HTTP_STATUS"
-        
-        if [[ "$HTTP_STATUS" -ge 200 && "$HTTP_STATUS" -lt 300 ]]; then
-          echo ""
-          echo "Notification sent successfully!"
-        else
-          echo ""
-          echo "Notification failed with HTTP $HTTP_STATUS"
-          echo ""
-          echo "Debug - Payload sent:"
-          printf '%s\n' "$PAYLOAD"
-          exit 1
-        fi
+      run: bash "${{ github.action_path }}/scripts/notify.sh"
